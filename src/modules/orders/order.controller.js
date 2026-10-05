@@ -1,24 +1,25 @@
-import Stripe from "stripe";
-import mongoose from "mongoose";
+import crypto, { randomUUID } from 'crypto';
+import mongoose from 'mongoose';
+import axios from 'axios';
 import catchAsync from "../../utils/catchAsync.js";
 import Order from "./order.model.js";
 import Package from "../services-packages/package.model.js";
 import AppError from "../../utils/AppError.js";
-import { sendOrderConfirmationEmail } from "./sendOrderEmail.js";
 
+export const initiateOrderAndPayment = catchAsync(async (req, res) => {
+    const { packageId, title, price, image, userId, userName, userEmail } = req.body;
 
-export const createPendingOrder = catchAsync(async (req, res) => {
-    const { orderId, packageId, title, price, image, userId, userName, userEmail } = req.body;
+    if (!packageId || !price) {
+        throw new AppError(400, "Package ID and Price are required.");
+    }
 
     const targetPackage = await Package.findById(packageId).lean();
 
-    // Calculate Delivery Date
     const daysMatch = targetPackage?.deliveryTime?.match(/\d+/);
     const deliveryDays = daysMatch ? parseInt(daysMatch[0]) : 7;
     const calculatedDeliveryDate = new Date();
     calculatedDeliveryDate.setDate(calculatedDeliveryDate.getDate() + deliveryDays);
 
-    // Validate ObjectIds safely
     const validUserId = (userId && mongoose.Types.ObjectId.isValid(userId))
         ? new mongoose.Types.ObjectId(userId)
         : null;
@@ -27,9 +28,10 @@ export const createPendingOrder = catchAsync(async (req, res) => {
         ? new mongoose.Types.ObjectId(packageId)
         : packageId;
 
-    // Create Order with default 'pending' status
+    const customOrderId = `ORD_${Date.now()}`;
+
     const newOrder = await Order.create({
-        orderId,
+        orderId: customOrderId,
         packageId: validPackageId,
         title: title || targetPackage?.title || "Service Package",
         image: image || targetPackage?.image?.[0] || "",
@@ -41,78 +43,171 @@ export const createPendingOrder = catchAsync(async (req, res) => {
         userName: userName || "Customer",
         userEmail: userEmail || "",
         status: "pending",
-        paymentStatus: "pending"
+        paymentStatus: "pending",
+        paymentGateway: "allpaypayz"
     });
 
-    return res.status(201).json({
-        success: true,
-        data: newOrder
-    });
-});
+    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const backendUrl = (process.env.BACKEND_URL || 'http://localhost:5000').replace(/\/$/, '');
 
-export const handleStripeWebhook = catchAsync(async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-    let event;
+    const amountMinor = Math.round(Number(price) * 100);
+
+    const paycorePayload = {
+        merchant_reference: customOrderId,
+        amount: {
+            amount_minor: amountMinor,
+            currency: "USD"
+        },
+        description: `Order: ${title || 'Service Package'}`,
+        customer: {
+            name: userName || "Customer",
+            email: userEmail || "customer@example.com"
+        },
+        payment_method: "card",
+        urls: {
+            success: `${frontendUrl}/success?orderId=${customOrderId}`,
+            error: `${frontendUrl}/canceled`,
+            callback: `${backendUrl}/api/order/allpaypayz-webhook`
+        }
+    };
 
     try {
-        event = stripe.webhooks.constructEvent(
-            req.body, // This MUST be raw buffer
-            sig,
-            process.env.STRIPE_WEBHOOK_SECRET
+        const response = await axios.post(
+            'https://api.paycore.cloud/v4/payments/redirect',
+            paycorePayload,
+            {
+                headers: {
+                    'Authorization': `Bearer ${process.env.ALLPAYPAYZ_API_KEY}`,
+                    'Content-Type': 'application/json',
+                    'Idempotency-Key': randomUUID(),
+                }
+            }
         );
-    } catch (err) {
-        console.error("Webhook Signature Verification Failed:", err.message);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
 
-    if (event.type === "checkout.session.completed") {
-        const session = event.data.object;
-        console.log("Stripe Session Completed for ID:", session.id);
+        const gatewayData = response.data;
+        const paymentRedirectUrl = gatewayData.redirect_url || gatewayData.url || gatewayData?.data?.redirect_url;
 
-        const { orderId } = session.metadata || {};
-        const stripeSessionId = session.id;
-        const paymentIntentId = session.payment_intent;
-        const customerEmail = session.customer_details?.email || session.customer_email;
-        const customerName = session.customer_details?.name;
-
-        if (!orderId) {
-            console.error("Missing orderId in session metadata");
-            return res.status(400).send("Missing orderId");
+        if (!paymentRedirectUrl) {
+            console.error("Payment Gateway did not return a valid redirect URL:", gatewayData);
+            throw new AppError(500, "Failed to retrieve payment redirect URL from gateway.");
         }
 
-        // Find the pending order
+        return res.status(200).json({
+            success: true,
+            url: paymentRedirectUrl,
+            orderId: customOrderId
+        });
+
+    } catch (apiError) {
+        console.error("Allpaypayz API Error:", apiError.response?.data || apiError.message);
+        throw new AppError(
+            apiError.response?.status || 500,
+            apiError.response?.data?.message || "Failed to initiate payment gateway."
+        );
+    }
+});
+
+export const handlePaycoreWebhook = catchAsync(async (req, res) => {
+    const SIGNING_SECRET = process.env.ALLPAYPAYZ_SECRET_KEY;
+    const TOLERANCE_SECONDS = 300;
+
+    const sig = req.headers['callback-signature'] || '';
+    const m = sig.match(/^t=(\d+),v1=([0-9a-f]+)/);
+
+    if (!m) {
+        console.error("Missing or invalid callback-signature header");
+        return res.status(400).send("Invalid signature header");
+    }
+
+    const [, ts, v1] = m;
+
+    const expected = crypto
+        .createHmac('sha256', SIGNING_SECRET)
+        .update(`${ts}.`)
+        .update(req.body) // raw buffer
+        .digest('hex');
+
+    const ok = v1.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(v1), Buffer.from(expected));
+
+    if (!ok) {
+        console.error("Webhook signature mismatch!");
+        return res.status(400).send("Signature verification failed");
+    }
+
+    if (Math.abs(Date.now() / 1000 - Number(ts)) > TOLERANCE_SECONDS) {
+        console.error("Expired webhook call");
+        return res.status(400).send("Stale webhook request");
+    }
+
+    const payload = JSON.parse(req.body.toString('utf8'));
+    const eventType = payload?.event?.type;
+    const eventId = payload?.event?.id;
+    const resource = payload?.event?.resource;
+
+    console.log(`Received Paycore Event: ${eventType} (ID: ${eventId})`);
+
+    if (eventType === 'payment.succeeded' || eventType === 'order.completed') {
+        const orderId = resource?.merchant_reference;
+
+        if (!orderId) {
+            return res.status(400).send("Missing merchant_reference");
+        }
+
         const existingOrder = await Order.findOne({ orderId });
         if (!existingOrder) {
-            console.error(`Pending order not found with ID: ${orderId}`);
             return res.status(404).send("Order not found");
         }
 
-
-        existingOrder.paymentStatus = "paid";
-        existingOrder.status = "processing";
-        existingOrder.stripeSessionId = stripeSessionId;
-        existingOrder.paymentIntentId = String(paymentIntentId || "");
-
-        if (!existingOrder.userEmail && customerEmail) {
-            existingOrder.userEmail = customerEmail;
+        if (existingOrder.paymentEventId === eventId && existingOrder.paymentStatus === 'paid') {
+            return res.status(200).json({ success: true, message: "Already processed" });
         }
-        if (existingOrder.userName === "Customer" && customerName) {
-            existingOrder.userName = customerName;
-        }
+
+        existingOrder.paymentStatus = 'paid';
+        existingOrder.status = 'processing';
+        existingOrder.gatewayOrderId = resource?.id || '';
+        existingOrder.paymentEventId = eventId || '';
 
         await existingOrder.save();
-        console.log("Order successfully updated to PAID! DB ID:", existingOrder._id);
+        console.log(`Order ${orderId} successfully marked as PAID!`);
     }
 
-    res.status(200).json({
+    return res.status(200).json({ success: true });
+});
+
+export const cancelOrder = catchAsync(async (req, res) => {
+    const { id } = req.params;
+    const userEmail = req.user.email;
+
+    const order = await Order.findOne({ _id: id, userEmail });
+    if (!order) {
+        throw new AppError(404, "Order not found or unauthorized");
+    }
+
+    if (order.status === 'cancelled') {
+        throw new AppError(400, "This order has already been cancelled");
+    }
+
+    const currentDate = new Date();
+    const deliveryDate = new Date(order.deliveryDate);
+
+    if (currentDate <= deliveryDate) {
+        throw new AppError(400, "You cannot cancel the order before delivery date passes");
+    }
+
+    order.status = 'cancelled';
+    order.paymentStatus = 'failed';
+    await order.save();
+
+    return res.status(200).json({
         success: true,
-        message: "Webhook event processed and order status updated successfully",
+        message: "Order cancelled successfully",
+        data: order
     });
 });
 
 export const getMyOrders = catchAsync(async (req, res) => {
-    const userEmail = req.user.email; // userId এর পরিবর্তে userEmail
+    const userEmail = req.user.email;
     const { page = 1, limit = 10 } = req.query;
 
     const pageNumber = Math.max(1, parseInt(page));
@@ -149,17 +244,13 @@ export const getOrderDetails = catchAsync(async (req, res) => {
     const userRole = req.user.role;
 
     let query = { _id: id };
-
     if (userRole !== 'admin') {
         query.userEmail = userEmail;
     }
 
-    const order = await Order.findOne(query)
-        .populate("packageId", "name features type")
-        .lean();
-
+    const order = await Order.findOne(query).populate("packageId", "name features type").lean();
     if (!order) {
-        throw new AppError(404, "Order not found or you don't have permission to view it");
+        throw new AppError(404, "Order not found");
     }
 
     return res.status(200).json({
@@ -173,9 +264,7 @@ export const getAllOrders = catchAsync(async (req, res) => {
     const { status, page = 1, limit = 10 } = req.query;
 
     const queryConditions = {};
-    if (status) {
-        queryConditions.status = status;
-    }
+    if (status) queryConditions.status = status;
 
     const pageNumber = Math.max(1, parseInt(page));
     const limitNumber = Math.max(1, parseInt(limit));
@@ -192,14 +281,12 @@ export const getAllOrders = catchAsync(async (req, res) => {
         Order.countDocuments(queryConditions),
     ]);
 
-    const totalPages = Math.ceil(totalOrders / limitNumber);
-
     return res.status(200).json({
         success: true,
         message: "All orders fetched successfully",
         meta: {
             totalOrders,
-            totalPages,
+            totalPages: Math.ceil(totalOrders / limitNumber),
             currentPage: pageNumber,
             limit: limitNumber,
         },
@@ -216,67 +303,14 @@ export const updateOrderStatus = catchAsync(async (req, res) => {
         throw new AppError(404, "Order not found");
     }
 
-    if (status) {
-        order.status = status;
-    }
-
-    if (deliveryDate) {
-        order.deliveryDate = new Date(deliveryDate);
-    }
+    if (status) order.status = status;
+    if (deliveryDate) order.deliveryDate = new Date(deliveryDate);
 
     await order.save();
 
     return res.status(200).json({
         success: true,
-        message: "Order progress updated successfully",
+        message: "Order updated successfully",
         data: order,
-    });
-});
-
-export const cancelOrder = catchAsync(async (req, res) => {
-    const { id } = req.params;
-    const userEmail = req.user.email;
-
-    const order = await Order.findOne({ _id: id, userEmail });
-    if (!order) {
-        throw new AppError(404, "Order not found or you don't have permission to cancel it");
-    }
-
-    if (order.status === 'cancelled') {
-        throw new AppError(400, "This order has already been cancelled");
-    }
-
-    const currentDate = new Date();
-    const deliveryDate = new Date(order.deliveryDate);
-
-    if (currentDate <= deliveryDate) {
-        throw new AppError(
-            400,
-            "You cannot cancel the order before the delivery date has passed"
-        );
-    }
-
-    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
-    const session = await stripe.checkout.sessions.retrieve(order.stripeSessionId);
-
-    if (!session || !session.payment_intent) {
-        throw new AppError(400, "No valid payment intent found for this order to issue a refund");
-    }
-
-    await stripe.refunds.create({
-        payment_intent: session.payment_intent,
-        reason: 'requested_by_customer'
-    });
-
-    order.status = 'cancelled';
-    order.paymentStatus = 'refunded';
-
-    await order.save();
-
-    res.status(200).json({
-        success: true,
-        message: "Order cancelled and refunded successfully",
-        data: order
     });
 });
