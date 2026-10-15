@@ -197,7 +197,11 @@ export const initiateOrderAndPayment = catchAsync(async (req, res) => {
         console.error("--- Allpaypayz API Error ---");
         console.error("HTTP Status:", status, "| Code:", code, "| Request ID:", requestId);
         console.error("Message:", message);
-        console.error("Body:", apiError.response?.data || apiError.message);
+        if (code === "cloudflare.challenge") {
+            console.error("Blocked by Cloudflare challenge (403) on the gateway host. Ask Allpaypayz to allowlist this server's outbound IP (cf-ray: " + requestId + ").");
+        } else {
+            console.error("Body:", apiError.response?.data || apiError.message);
+        }
         console.error("----------------------------");
 
         // গেটওয়ে ফেইল করলে অর্ডার পেন্ডিং ফেলে না রেখে ফেইলড মার্ক করা
