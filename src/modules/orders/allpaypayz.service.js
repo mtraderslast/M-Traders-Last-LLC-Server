@@ -11,6 +11,7 @@ const getBaseUrl = () =>
 const authHeaders = () => ({
     Authorization: `Bearer ${process.env.ALLPAYPAYZ_API_KEY}`,
     Accept: "application/json",
+    "User-Agent": "MTraders-Backend/1.0 (allpaypayz-integration)",
 });
 
 // গেটওয়ের এরর কোড অনুযায়ী ইউজার-ফ্রেন্ডলি মেসেজ
@@ -24,9 +25,28 @@ const FRIENDLY_MESSAGES = {
 /**
  * Allpaypayz এরর ফরম্যাট: { ok:false, error:{ type, code, message, details[] }, request_id }
  */
+// Cloudflare "Just a moment..." চ্যালেঞ্জ পেজ (গেটওয়ের API নয়, তাদের ফায়ারওয়াল সার্ভারের IP আটকে দিয়েছে)
+export const isCloudflareChallenge = (err) => {
+    const body = err.response?.data;
+    return (
+        err.response?.status === 403 &&
+        typeof body === "string" &&
+        (body.includes("Just a moment") || body.includes("cf_chl") || body.includes("challenges.cloudflare.com"))
+    );
+};
+
 export const parseGatewayError = (err) => {
     const status = err.response?.status;
     const body = err.response?.data;
+
+    if (isCloudflareChallenge(err)) {
+        return {
+            status,
+            code: "cloudflare.challenge",
+            message: "The payment gateway is temporarily unreachable from our server. Please contact support.",
+            requestId: err.response?.headers?.["cf-ray"] || null,
+        };
+    }
     const apiError = typeof body === "object" ? body?.error : null;
 
     const code = apiError?.code || null;
