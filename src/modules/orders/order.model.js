@@ -26,6 +26,10 @@ const orderSchema = new mongoose.Schema(
         paymentGateway: { type: String, default: 'allpaypayz' },
         gatewayOrderId: { type: String, default: '' },
         paymentEventId: { type: String, default: '' },
+        paymentFailureReason: { type: String, default: '' },
+        // গেটওয়ে যে পরিমাণ আসলে confirm করেছে (minor unit) এবং তা অর্ডারের দামের সাথে না মিললে true
+        paidAmountMinor: { type: Number, default: null },
+        amountMismatch: { type: Boolean, default: false },
     },
     {
         timestamps: true,
