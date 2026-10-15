@@ -13,6 +13,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "axios": "^1.20.0",
     "better-auth": "^1.6.23",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
