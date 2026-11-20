@@ -35,7 +35,8 @@ export const packageValidationSchema = z.object({
         .min(30, "Description must be at least 30 characters."),
     price: z.coerce
         .number({ error: "Price is required." })
-        .min(0, "Price cannot be negative."),
+        .min(0, "Price cannot be negative.")
+        .transform((amount) => Math.round(amount * 100) / 100),
     deliveryTime: z
         .string({ error: "Delivery time is required." })
         .trim()

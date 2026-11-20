@@ -41,6 +41,12 @@ const packageSchema = new Schema(
             type: Number,
             required: true,
             min: 0,
+            // ডলার ও সেন্ট: 99.99 সেভ হয়, অতিরিক্ত দশমিক সেন্টে রাউন্ড হয়
+            set: (value) => {
+                const amount = Number(value);
+                if (!Number.isFinite(amount)) return value;
+                return Math.round(amount * 100) / 100;
+            },
         },
         deliveryTime: {
             type: String,
