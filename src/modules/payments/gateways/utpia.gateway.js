@@ -11,6 +11,8 @@ import {
 
 const VERSION = "1.0.0";
 const REQUEST_TIMEOUT_MS = 20000;
+const USD_MIN_AMOUNT = 9.99;
+const USD_MAX_AMOUNT = 499.99;
 const isHttpUrl = (value) => /^https?:\/\//i.test(String(value || "").trim());
 
 const getBaseUrl = () =>
