@@ -23,9 +23,11 @@ const orderSchema = new mongoose.Schema(
             enum: ['pending', 'paid', 'failed'],
             default: 'pending'
         },
+        currency: { type: String, default: 'USD' },
         paymentGateway: { type: String, default: 'allpaypayz' },
         gatewayOrderId: { type: String, default: '' },
         paymentEventId: { type: String, default: '' },
+        proofId: { type: String, default: '' },
         paymentFailureReason: { type: String, default: '' },
         // গেটওয়ে যে পরিমাণ আসলে confirm করেছে (minor unit) এবং তা অর্ডারের দামের সাথে না মিললে true
         paidAmountMinor: { type: Number, default: null },

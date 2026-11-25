@@ -5,6 +5,7 @@ import { toNodeHandler } from "better-auth/node";
 import packageRoute from "./modules/services-packages/package.routes.js";
 import savePackageRouter from "./modules/savePackage/savePackage.routes.js";
 import orderRouter from "./modules/orders/order.routes.js";
+import paymentRouter from "./modules/payments/payment.routes.js";
 import ReviewRoutes from "./modules/reviews/review.route.js";
 import AdminRoute from "./modules/admin/admin.route.js";
 import emailRoute from "./modules/emailSender/email.route.js";
@@ -25,6 +26,7 @@ const createApp = (auth) => {
     app.use(cookieParser());
 
     app.use("/api/order", orderRouter);
+    app.use("/api/payments", paymentRouter);
 
     app.use(express.json());
 
